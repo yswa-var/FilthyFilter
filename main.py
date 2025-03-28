@@ -1,138 +1,189 @@
-import tkinter as tk
-from tkinter import filedialog, ttk
-from PIL import Image, ImageTk
 import cv2
 import numpy as np
-from pathlib import Path
+import pytesseract
+import os
 
+class AnimeWallpaperBot:
+    def __init__(self, video_path, output_dir='wallpapers'):
+        """
+        Initialize the bot with video path and output directory
+        
+        Args:
+            video_path (str): Path to the anime movie video file
+            output_dir (str): Directory to save wallpaper frames
+        """
+        self.video_path = video_path
+        self.output_dir = output_dir
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Load anime face detection cascade
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-class ImageEditor:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Image Editor")
+    def get_sharpness(self, frame):
+        """
+        Compute image sharpness using Laplacian variance
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            float: Sharpness score
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
 
-        # Initialize variables
-        self.current_image = None
-        self.original_image = None
-        self.current_image_path = None
+    def get_color_variance(self, frame):
+        """
+        Compute color variance in HSV color space
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            float: Color variance score
+        """
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hue = hsv[:, :, 0]
+        return hue.var()
 
-        self.setup_ui()
+    def get_edge_density(self, frame):
+        """
+        Compute edge density using Canny edge detection
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            float: Edge density score
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+        return edges.sum() / (edges.shape[0] * edges.shape[1])
 
-    def setup_ui(self):
-        self.main_frame = ttk.Frame(self.root, padding="10")
-        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    def get_symmetry(self, frame):
+        """
+        Compute frame symmetry by comparing left and right halves
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            float: Symmetry score
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        left = gray[:, :gray.shape[1]//2]
+        right = cv2.flip(gray[:, gray.shape[1]//2:], 1)
+        diff = ((left - right) ** 2).mean()
+        return 1 / (1 + diff)
 
-        self.button_frame = ttk.Frame(self.main_frame)
-        self.button_frame.grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+    def detect_faces(self, frame):
+        """
+        Detect faces in the frame
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            tuple: Number of faces and list of face sizes
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5)
+        return len(faces), [w * h for (x, y, w, h) in faces]
 
-        self.load_btn = ttk.Button(self.button_frame, text="Load Image", command=self.load_image)
-        self.load_btn.grid(row=0, column=0, padx=5)
+    def has_text(self, frame):
+        """
+        Check if frame contains text
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            bool: True if text is detected, False otherwise
+        """
+        try:
+            text = pytesseract.image_to_string(frame)
+            return len(text.strip()) > 0
+        except:
+            return False
 
-        self.save_btn = ttk.Button(self.button_frame, text="Save Image", command=self.save_image)
-        self.save_btn.grid(row=0, column=1, padx=5)
+    def compute_beauty_score(self, frame):
+        """
+        Compute overall beauty score for a frame
+        
+        Args:
+            frame (numpy.ndarray): Input image frame
+        
+        Returns:
+            float: Beauty score
+        """
+        # Skip frames with text or low sharpness
+        if self.has_text(frame) or self.get_sharpness(frame) < 100:
+            return -1
 
-        self.reset_btn = ttk.Button(self.button_frame, text="Reset", command=self.reset_image)
-        self.reset_btn.grid(row=0, column=2, padx=5)
+        num_faces, face_sizes = self.detect_faces(frame)
+        num_large_faces = sum(1 for size in face_sizes if size > 50000)
 
-        self.filters_frame = ttk.LabelFrame(self.main_frame, text="Filters", padding="5")
-        self.filters_frame.grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        # Weights for different features
+        w_faces = 0.5
+        w_color = 0.3
+        w_edge = 0.1
+        w_symmetry = 0.1
 
-        filters = [
-            ("Grayscale", self.apply_grayscale),
-            ("Blur", self.apply_blur),
-            ("Sharpen", self.apply_sharpen),
-            ("Edge Detection", self.apply_edge_detection),
-            ("Sepia", self.apply_sepia)
-        ]
+        score = (w_faces * num_large_faces) + \
+                (w_color * self.get_color_variance(frame)) + \
+                (w_edge * self.get_edge_density(frame)) + \
+                (w_symmetry * self.get_symmetry(frame))
 
-        for i, (filter_name, filter_command) in enumerate(filters):
-            btn = ttk.Button(self.filters_frame, text=filter_name, command=filter_command)
-            btn.grid(row=0, column=i, padx=5)
+        return score
 
-        self.image_label = ttk.Label(self.main_frame)
-        self.image_label.grid(row=2, column=0, padx=5, pady=5)
+    def extract_wallpapers(self, num_wallpapers=10):
+        """
+        Extract wallpaper-worthy frames from the video
+        
+        Args:
+            num_wallpapers (int): Number of top wallpapers to extract
+        
+        Returns:
+            list: List of tuples (frame, score)
+        """
+        video = cv2.VideoCapture(self.video_path)
+        frames_with_scores = []
+        count = 0
 
-    def load_image(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp")]
-        )
-        if file_path:
-            self.current_image_path = file_path
-            self.original_image = Image.open(file_path)
-            self.current_image = self.original_image.copy()
-            self.display_image()
+        while video.isOpened():
+            ret, frame = video.read()
+            if not ret:
+                break
 
-    def save_image(self):
-        if self.current_image:
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".png",
-                filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg")]
-            )
-            if file_path:
-                self.current_image.save(file_path)
+            # Extract 1 frame per second
+            if count % int(video.get(cv2.CAP_PROP_FPS)) == 0:
+                score = self.compute_beauty_score(frame)
+                if score > 0:
+                    frames_with_scores.append((frame, score))
 
-    def reset_image(self):
-        if self.original_image:
-            self.current_image = self.original_image.copy()
-            self.display_image()
+            count += 1
 
-    def display_image(self):
-        if self.current_image:
-            display_size = (800, 600)
-            self.current_image.thumbnail(display_size, Image.Resampling.LANCZOS)
+        video.release()
 
-            photo = ImageTk.PhotoImage(self.current_image)
-            self.image_label.configure(image=photo)
-            self.image_label.image = photo  # Keep a reference
+        # Sort frames by beauty score and select top wallpapers
+        frames_with_scores.sort(key=lambda x: x[1], reverse=True)
+        top_frames = frames_with_scores[:num_wallpapers]
 
-    def apply_grayscale(self):
-        if self.current_image:
-            img_array = np.array(self.current_image)
-            gray_image = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            self.current_image = Image.fromarray(gray_image)
-            self.display_image()
+        # Save wallpapers
+        for i, (frame, score) in enumerate(top_frames):
+            filename = os.path.join(self.output_dir, f'wallpaper_{i}_score_{score:.2f}.png')
+            cv2.imwrite(filename, frame)
+            print(f"Saved wallpaper: {filename}")
 
-    def apply_blur(self):
-        if self.current_image:
-            img_array = np.array(self.current_image)
-            blurred = cv2.GaussianBlur(img_array, (5, 5), 0)
-            self.current_image = Image.fromarray(blurred)
-            self.display_image()
+        return top_frames
 
-    def apply_sharpen(self):
-        if self.current_image:
-            sharpening_kernel = np.array([[-1, -1, -1],
-                                          [-1, 9, -1],
-                                          [-1, -1, -1]])
-            img_array = np.array(self.current_image)
-            sharpened = cv2.filter2D(img_array, -1, sharpening_kernel)
-            self.current_image = Image.fromarray(sharpened)
-            self.display_image()
-
-    def apply_edge_detection(self):
-        if self.current_image:
-            img_array = np.array(self.current_image)
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            edges = cv2.Canny(gray, 100, 200)
-            edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-            self.current_image = Image.fromarray(edges_rgb)
-            self.display_image()
-
-    def apply_sepia(self):
-        if self.current_image:
-            img_array = np.array(self.current_image)
-            sepia_kernel = np.array([
-                [0.393, 0.769, 0.189],
-                [0.349, 0.686, 0.168],
-                [0.272, 0.534, 0.131]
-            ])
-            sepia_image = cv2.transform(img_array, sepia_kernel)
-            sepia_image = np.clip(sepia_image, 0, 255).astype(np.uint8)
-            self.current_image = Image.fromarray(sepia_image)
-            self.display_image()
-
+def main():
+    # Example usage
+    video_path = 'anime_movie.mp4'
+    bot = AnimeWallpaperBot(video_path)
+    bot.extract_wallpapers(num_wallpapers=10)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ImageEditor(root)
-    root.mainloop()
+    main()
